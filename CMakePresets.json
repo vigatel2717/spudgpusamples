@@ -1,0 +1,35 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "windows-d3d12",
+      "displayName": "SpudGPU Samples Windows D3D12",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build-windows-d3d12",
+      "cacheVariables": {
+        "GRAPHICS_BACKEND": "D3D12"
+      }
+    },
+    {
+      "name": "windows-vulkan",
+      "displayName": "SpudGPU Samples Windows Vulkan",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build-windows-vulkan",
+      "cacheVariables": {
+        "GRAPHICS_BACKEND": "Vulkan"
+      }
+    },
+    {
+      "name": "macos-metal",
+      "displayName": "SpudGPU Samples macOS Metal",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-macos-metal",
+      "cacheVariables": {
+        "GRAPHICS_BACKEND": "Metal",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+/build-*/
+/.idea/
+/.vs/
+/cmake-build-*/
+/.claude/worktrees/
+.DS_Store

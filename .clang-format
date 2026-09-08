@@ -1,0 +1,13 @@
+BasedOnStyle: LLVM
+AlignConsecutiveAssignments:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: false
+
+TabWidth: 4
+IndentWidth: 4
+UseTab: ForIndentation
+
+BinPackParameters: AlwaysOnePerLine
+AlignAfterOpenBracket: AlwaysBreak
+ColumnLimit: 160
