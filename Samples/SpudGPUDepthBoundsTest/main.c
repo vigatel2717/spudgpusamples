@@ -83,6 +83,8 @@ int main(void) {
 
 #if SPUDGPU_COMPILE_D3D12_API
 	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_D3D12;
+#elif SPUDGPU_COMPILE_METAL_API
+	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_METAL;
 #else
 	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_VULKAN;
 #endif
@@ -124,7 +126,14 @@ int main(void) {
 	    .queue           = graphics_queue,
 	    .width           = WINDOW_WIDTH,
 	    .height          = WINDOW_HEIGHT,
+	    // Metal's CAMetalLayer hands out one drawable at a time -- no stable
+	    // N-image array to double-buffer against like Vulkan/D3D12, so
+	    // spudgpu_create_swap_chain rejects anything but 1 on that backend.
+#if SPUDGPU_COMPILE_METAL_API
+	    .buffer_count    = 1,
+#else
 	    .buffer_count    = 2,
+#endif
 	    .format          = SPUDGPU_FORMAT_B8G8R8A8_UNORM,
 	    .present_mode    = SPUDGPU_PRESENT_MODE_FIFO,
 	    .fullscreen_mode = SPUDGPU_FULLSCREEN_MODE_WINDOWED,

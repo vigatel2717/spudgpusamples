@@ -3,10 +3,12 @@ target_link_libraries(SpudGPUDepthBoundsTest PRIVATE spudlib SDL3::SDL3)
 
 # Shaders are SPIR-V regardless of GRAPHICS_BACKEND -- see
 # HelloConstBuffers/CMakeLists.txt for why glslc is the one shader toolchain
-# both backends need. This sample only ever builds against Vulkan/D3D12
-# (see spudgpusamples/CMakeLists.txt's GRAPHICS_BACKEND guard -- Metal has
-# no depth-bounds-test primitive at all, see spudlib/include/spudgpu.h's
-# SPUDGPU_EXT_DEPTH_BOUNDS_TEST section).
+# every backend needs, Metal included (Metal cross-compiles the same SPIR-V
+# to MSL, see spudlib/CLAUDE.md). This sample builds on all three backends
+# (see spudgpusamples/CMakeLists.txt) -- whether spudgpu_cmd_set_depth_bounds
+# actually does anything on a given Metal device depends on
+# spudgpu_depth_bounds_capabilities::supported at runtime (gated to
+# MTLGPUFamilyApple10, macOS/iOS 26+), not on GRAPHICS_BACKEND.
 if(WIN32)
     set(Vulkan_GLSLC_EXECUTABLE "C:/VulkanSDK/1.4.341.1/Bin/glslc.exe")
 endif()

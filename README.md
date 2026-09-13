@@ -23,7 +23,7 @@ workaround to invent here.
 | SpudGPUDynamicIndexing | `D3D12DynamicIndexing` | Ported, Vulkan/D3D12 only (see note below) |
 | SpudGPUMeshShaders | `D3D12MeshShaders/MeshletRender` | Ported, all backends (see note below) |
 | SpudGPUBundles | `D3D12Bundles` | Ported, Vulkan/D3D12 only (see note below) |
-| SpudGPUDepthBoundsTest | `D3D12DepthBoundsTest` | Ported, Vulkan/D3D12 only (see note below) |
+| SpudGPUDepthBoundsTest | `D3D12DepthBoundsTest` | Ported, all backends (see note below) |
 
 `SpudGPUExecuteIndirect` closed a real gap: `spudgpu` had no compute-dispatch
 call at all, and no buffer pipeline barriers on any backend, both now added
@@ -139,13 +139,25 @@ whether the depth attachment's *existing* value at that pixel (already
 written by an earlier draw) falls inside a caller-set `[min, max]` window, set
 per-draw via the new `spudgpu_cmd_set_depth_bounds`. Added on Vulkan
 (`VkPhysicalDeviceFeatures::depthBounds` + `vkCmdSetDepthBounds`, both core
-1.0, no extension) and D3D12 (`D3D12_DEPTH_STENCIL_DESC1::
-DepthBoundsTestEnable` + `ID3D12GraphicsCommandList1::OMSetDepthBounds`),
-gated behind the new `SPUDGPU_EXT_DEPTH_BOUNDS_TEST` — `1` on Vulkan/D3D12,
-`0` on Metal, which has no depth-bounds-test primitive on either
-`MTLDepthStencilDescriptor` or `MTLRenderCommandEncoder` at all (a structural
-gap, the same flavor as bindless/bundles), so this sample only builds against
-Vulkan/D3D12. Adding `DepthBoundsTestEnable` to D3D12's pipeline creation also
+1.0, no extension), D3D12 (`D3D12_DEPTH_STENCIL_DESC1::
+DepthBoundsTestEnable` + `ID3D12GraphicsCommandList1::OMSetDepthBounds`), and
+Metal (`[MTLRenderCommandEncoder setDepthTestMinBound:maxBound:]`, macOS/iOS
+26+), gated behind the new `SPUDGPU_EXT_DEPTH_BOUNDS_TEST` — `1` on **every**
+backend, since unlike bindless/bundles this isn't a structural gap on Metal
+(the primitive genuinely exists there, just very recently added). What does
+vary per-device is runtime hardware support, the `SPUDGPU_EXT_MESH_SHADING`
+flavor of this pattern rather than the bindless/bundles flavor:
+`spudgpu_depth_bounds_capabilities::supported` reflects
+`VkPhysicalDeviceFeatures::depthBounds` (Vulkan),
+`D3D12_FEATURE_DATA_D3D12_OPTIONS2::DepthBoundsTestSupported` (D3D12), or
+`[MTLDevice supportsFamily:MTLGPUFamilyApple10]` (Metal — the newest Apple
+GPU family as of this writing, so expect `false` on most Metal hardware in
+the field today even though the sample still builds and runs there). Metal
+also has no pipeline-level enable toggle at all, unlike Vulkan/D3D12 —
+`spudgpu_shader_pipeline_desc::depth_bounds_test_enable` is ignored there,
+and `spudgpu_cmd_set_depth_bounds` alone both enables and configures the test
+per draw (passing `(0, 1)` disables it, matching Metal's own default-disabled
+semantics). Adding `DepthBoundsTestEnable` to D3D12's pipeline creation also
 closed a smaller, adjacent gap: that field only exists on
 `D3D12_DEPTH_STENCIL_DESC1`, reachable only through `CreatePipelineState`'s
 PSO-stream path — `spudgpu_create_shader_pipeline`'s classic (non-mesh)
@@ -192,7 +204,10 @@ cmake --build build-windows-vulkan --target HelloTriangle
 
 On Apple Silicon, samples also build and run against `GRAPHICS_BACKEND=Metal`
 (see `spudlib/CLAUDE.md`) — except `SpudGPUDynamicIndexing`, which needs
-bindless descriptor indexing, `SpudGPUBundles`, which needs
-`SPUDGPU_EXT_BUNDLES`, and `SpudGPUDepthBoundsTest`, which needs
-`SPUDGPU_EXT_DEPTH_BOUNDS_TEST`; none of the three are buildable on Metal
-(see above).
+bindless descriptor indexing, and `SpudGPUBundles`, which needs
+`SPUDGPU_EXT_BUNDLES`; neither is buildable on Metal (see above).
+`SpudGPUDepthBoundsTest` *does* build and run on Metal — its
+`SPUDGPU_EXT_DEPTH_BOUNDS_TEST` gap isn't structural there — but
+`spudgpu_depth_bounds_capabilities::supported` will be `false` on anything
+short of `MTLGPUFamilyApple10` hardware, so the animated bounds window has
+no visible effect on most Metal devices today even though the sample runs.

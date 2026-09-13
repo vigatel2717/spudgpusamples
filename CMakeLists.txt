@@ -75,11 +75,12 @@ if(NOT GRAPHICS_BACKEND STREQUAL "Metal")
     add_subdirectory(Samples/SpudGPUBundles)
 endif()
 
-# Depth bounds test (SPUDGPU_EXT_DEPTH_BOUNDS_TEST) is 0 on Metal -- there is
-# no MTLDepthStencilDescriptor field or MTLRenderCommandEncoder method for it
-# at all (see spudlib/include/spudgpu.h). Calling spudgpu_cmd_set_depth_bounds
-# against a Metal build is a compile/link error by design, so this sample is
-# only buildable against Vulkan/D3D12.
-if(NOT GRAPHICS_BACKEND STREQUAL "Metal")
-    add_subdirectory(Samples/SpudGPUDepthBoundsTest)
-endif()
+# Depth bounds test (SPUDGPU_EXT_DEPTH_BOUNDS_TEST) is implemented on all
+# three backends -- unlike bindless/bundles, Metal's
+# [MTLRenderCommandEncoder setDepthTestMinBound:maxBound:] (macOS/iOS 26+) is
+# a real primitive, not a structural gap, so this sample builds everywhere.
+# Whether a given device actually honors it at runtime
+# (spudgpu_depth_bounds_capabilities::supported, gated to MTLGPUFamilyApple10
+# on Metal) is this sample's own concern, not a build-time one -- see
+# spudlib/include/spudgpu.h.
+add_subdirectory(Samples/SpudGPUDepthBoundsTest)
