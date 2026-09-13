@@ -74,3 +74,12 @@ add_subdirectory(Samples/SpudGPUMeshShaders)
 if(NOT GRAPHICS_BACKEND STREQUAL "Metal")
     add_subdirectory(Samples/SpudGPUBundles)
 endif()
+
+# Depth bounds test (SPUDGPU_EXT_DEPTH_BOUNDS_TEST) is 0 on Metal -- there is
+# no MTLDepthStencilDescriptor field or MTLRenderCommandEncoder method for it
+# at all (see spudlib/include/spudgpu.h). Calling spudgpu_cmd_set_depth_bounds
+# against a Metal build is a compile/link error by design, so this sample is
+# only buildable against Vulkan/D3D12.
+if(NOT GRAPHICS_BACKEND STREQUAL "Metal")
+    add_subdirectory(Samples/SpudGPUDepthBoundsTest)
+endif()
