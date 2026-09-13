@@ -64,3 +64,13 @@ endif()
 # Mesh shading (SPUDGPU_EXT_MESH_SHADING) is implemented on all three
 # backends, so this sample builds everywhere -- no guard needed.
 add_subdirectory(Samples/SpudGPUMeshShaders)
+
+# Bundles (SPUDGPU_EXT_BUNDLES) are 0 on Metal -- MTLCommandBuffer/
+# MTLRenderCommandEncoder are single-use, so there's no CPU-side reusable
+# secondary-command mechanism to record a bundle into at all (see
+# spudlib/CLAUDE.md). Calling spudgpu_cmd_execute_bundle against a Metal
+# build is a compile/link error by design, so this sample is only buildable
+# against Vulkan/D3D12.
+if(NOT GRAPHICS_BACKEND STREQUAL "Metal")
+    add_subdirectory(Samples/SpudGPUBundles)
+endif()

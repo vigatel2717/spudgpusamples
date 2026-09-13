@@ -22,6 +22,7 @@ workaround to invent here.
 | SpudGPUExecuteIndirect | `D3D12ExecuteIndirect` | Ported (see note below) |
 | SpudGPUDynamicIndexing | `D3D12DynamicIndexing` | Ported, Vulkan/D3D12 only (see note below) |
 | SpudGPUMeshShaders | `D3D12MeshShaders/MeshletRender` | Ported, all backends (see note below) |
+| SpudGPUBundles | `D3D12Bundles` | Ported, Vulkan/D3D12 only (see note below) |
 
 `SpudGPUExecuteIndirect` closed a real gap: `spudgpu` had no compute-dispatch
 call at all, and no buffer pipeline barriers on any backend, both now added
@@ -93,6 +94,43 @@ an UPLOAD-heap resource can't carry `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`
 sample is therefore Vulkan/Metal-verified only; D3D12 needs
 `spudgpu_cmd_copy_buffer` before it can run there at all.
 
+`SpudGPUBundles` closed the last real gap `SPUDGPU_COMMAND_LIST_TYPE_BUNDLE`
+had been sitting on since it was added to the base command-list-type enum:
+the type existed and D3D12's allocator/list creation already honored it, but
+nothing could actually *execute* a bundle once recorded. Now added, gated
+behind the new `SPUDGPU_EXT_BUNDLES` (`spudgpu_begin_bundle_command_list`,
+`spudgpu_cmd_execute_bundle`) — `1` on Vulkan/D3D12, `0` on Metal, the same
+flavor of `EXT` as bindless (a structural capability gap, not a runtime
+driver check): Metal's `MTLCommandBuffer`/`MTLRenderCommandEncoder` are
+single-use, so there's no CPU-side reusable secondary-command mechanism to
+record a bundle into at all. D3D12's implementation is the straightforward
+native case (`ID3D12GraphicsCommandList::ExecuteBundle`); Vulkan's bundle is
+a `VK_COMMAND_BUFFER_LEVEL_SECONDARY` buffer replayed via
+`vkCmdExecuteCommands`, which — since this codebase is dynamic-rendering-only
+(no `VkRenderPass`) — needed `VkCommandBufferInheritanceRenderingInfo` wired
+through a new `spudgpu_begin_bundle_command_list`/`spudgpu_bundle_inheritance_
+desc` (the attachment formats a secondary buffer will replay under, since
+there's no framebuffer object to infer them from) plus a new
+`will_execute_bundles` flag on `spudgpu_rendering_begin_desc` so the primary
+list's `vkCmdBeginRendering` opens with
+`VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT` only when the caller
+actually intends to execute one — SpudLib never infers that on the caller's
+behalf (see `spudlib/CLAUDE.md`'s zero-policy rule). The sample itself
+demonstrates the mechanism the original does: a `CityRowCount x
+CityColumnCount` (10x3) grid of `occcity` buildings (the same asset
+`SpudGPUDynamicIndexing` uses), each with its own per-object CBV, drawn
+either by replaying one bundle recorded once at startup (default) or by
+re-recording the identical bind+draw sequence into the direct command list
+every frame — press `C` to toggle, matching the original's own keybinding.
+Two deliberate simplifications versus the original: no diffuse texture (this
+sample isn't about texturing — each building instead gets a fixed
+HSL-gradient color baked into its CBV, so it only exercises the bundle
+mechanism itself), and single-buffered CBV storage overwritten in place every
+frame, matching every other sample in this suite, rather than the original's
+3 rotating `FrameResource`s — the bundle's recorded descriptor-set bindings
+point at fixed buffer offsets regardless, so this doesn't touch the actual
+mechanism being demonstrated.
+
 See `../spudlib/CLAUDE.md` and `../CLAUDE.md` for the architecture this
 repo sits alongside.
 
@@ -111,4 +149,5 @@ cmake --build build-windows-vulkan --target HelloTriangle
 
 On Apple Silicon, samples also build and run against `GRAPHICS_BACKEND=Metal`
 (see `spudlib/CLAUDE.md`) — except `SpudGPUDynamicIndexing`, which needs
-bindless descriptor indexing and isn't buildable on Metal yet (see above).
+bindless descriptor indexing, and `SpudGPUBundles`, which needs
+`SPUDGPU_EXT_BUNDLES`; neither is buildable on Metal (see above).
