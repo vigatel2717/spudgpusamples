@@ -1,0 +1,38 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug (CodeLLDB)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${command:cmake.launchTargetPath}",
+            "args": [],
+            "cwd": "${command:cmake.launchTargetDirectory}"
+        },
+        {
+            "name": "Debug SpudGPUDynamicIndexing (Windows D3D12)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-windows-d3d12/Samples/SpudGPUDynamicIndexing/Debug/SpudGPUDynamicIndexing.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/build-windows-d3d12/Samples/SpudGPUDynamicIndexing/Debug"
+        },
+        {
+            "name": "Debug SpudGPUDynamicIndexing (Windows Vulkan)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-windows-vulkan/Samples/SpudGPUDynamicIndexing/Debug/SpudGPUDynamicIndexing.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/build-windows-vulkan/Samples/SpudGPUDynamicIndexing/Debug"
+        },
+        {
+            "name": "Debug SpudGPUDynamicIndexing (Linux Vulkan)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-linux-vulkan/Samples/SpudGPUDynamicIndexing/SpudGPUDynamicIndexing",
+            "args": [],
+            "cwd": "${workspaceFolder}/build-linux-vulkan/Samples/SpudGPUDynamicIndexing",
+            "MIMode": "gdb"
+        }
+    ]
+}

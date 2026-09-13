@@ -1,7 +1,8 @@
 //
-// SpudGPU port of D3D12HelloWorld/HelloTriangle from d3d12samples.
-// Same scene (one hardcoded, unindexed, unlit triangle), rebuilt entirely
-// against spudgpu_* calls instead of ID3D12*/DXGI -- see ../../README.md.
+// SpudGPU port of D3D12HelloWorld/HelloConstBuffers from d3d12samples.
+// Same triangle as ../HelloTriangle, but the vertex shader now offsets the
+// triangle by a value read from a uniform buffer bound through a real
+// spudgpu_descriptor_set -- see ../../README.md.
 //
 
 #include <SDL3/SDL.h>
@@ -20,6 +21,14 @@ typedef struct Vertex {
 	float position[2];
 	float color[3];
 } Vertex;
+
+// Matches shaders/scene.vert's SceneConstantBuffer block exactly (std140: a
+// single vec4 needs no manual padding, unlike the 256-byte-aligned D3D12
+// original -- that padding is a CBV root-descriptor alignment rule specific
+// to D3D12, not a Vulkan/Metal requirement).
+typedef struct SceneConstantBuffer {
+	float offset[4];
+} SceneConstantBuffer;
 
 static void *read_entire_file(const char *path, size_t *out_size) {
 	FILE *f = fopen(path, "rb");
@@ -65,7 +74,7 @@ int main(void) {
 		return 1;
 	}
 
-	SDL_Window *window = SDL_CreateWindow("SpudGPU HelloTriangle", WINDOW_WIDTH, WINDOW_HEIGHT, 0);
+	SDL_Window *window = SDL_CreateWindow("SpudGPU HelloConstBuffers", WINDOW_WIDTH, WINDOW_HEIGHT, 0);
 	if (!window) {
 		fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
 		return 1;
@@ -80,13 +89,13 @@ int main(void) {
 #endif
 
 	spudgpu_instance instance = NULL;
-	if (SPUDFAIL(spudgpu_create_instance(native_api, "SpudGPUHelloTriangle", 1, "SpudGPUSamples", 1, &instance))) {
+	if (SPUDFAIL(spudgpu_create_instance(native_api, "SpudGPUHelloConstBuffers", 1, "SpudGPUSamples", 1, &instance))) {
 		fprintf(stderr, "spudgpu_create_instance failed\n");
 		return 1;
 	}
 
-	spudgpu_device *devices  = NULL;
-	uint32_t device_count    = 0;
+	spudgpu_device *devices = NULL;
+	uint32_t device_count   = 0;
 	if (SPUDFAIL(spudgpu_enumerate_devices(instance, &devices, &device_count)) || device_count == 0) {
 		fprintf(stderr, "spudgpu_enumerate_devices failed or returned no devices\n");
 		return 1;
@@ -129,7 +138,7 @@ int main(void) {
 	}
 
 	// Vertex buffer: one hardcoded triangle, host-visible and written once --
-	// same "just enough to draw a triangle" scope as the D3D12 sample.
+	// same "just enough to draw a triangle" scope as HelloTriangle.
 	static const Vertex vertices[3] = {
 	    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
 	    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
@@ -161,8 +170,77 @@ int main(void) {
 	spudgpu_buffer_view vertex_buffer_view = NULL;
 	spudgpu_create_buffer_view(vertex_buffer, &vertex_buffer_view_desc, &vertex_buffer_view);
 
-	spudgpu_shader_module vertex_module   = load_shader_module(device, "shaders/triangle.vert.spv", SPUDGPU_SHADER_STAGE_VERTEX);
-	spudgpu_shader_module fragment_module = load_shader_module(device, "shaders/triangle.frag.spv", SPUDGPU_SHADER_STAGE_FRAGMENT);
+	// Scene constant buffer: one vec4 offset, updated every frame and kept
+	// mapped for the app's lifetime -- same pattern as the D3D12 original
+	// (map once, memcpy new contents in each frame, never unmap until exit).
+	spudgpu_buffer_desc scene_cb_desc = {
+	    .usage        = SPUDGPU_BUFFER_USAGE_UNIFORM,
+	    .memory_flags = SPUDGPU_MEMORY_FLAGS_HOST_VISIBLE | SPUDGPU_MEMORY_FLAGS_HOST_COHERENT,
+	    .size         = sizeof(SceneConstantBuffer),
+	};
+	spudgpu_buffer scene_cb = NULL;
+	if (SPUDFAIL(spudgpu_create_buffer(device, &scene_cb_desc, &scene_cb))) {
+		fprintf(stderr, "spudgpu_create_buffer (scene constant buffer) failed\n");
+		return 1;
+	}
+	SceneConstantBuffer scene_cb_data = {.offset = {0.0f, 0.0f, 0.0f, 0.0f}};
+	void *scene_cb_mapped             = NULL;
+	spudgpu_map_buffer(scene_cb, 0, 0, &scene_cb_mapped);
+	memcpy(scene_cb_mapped, &scene_cb_data, sizeof(scene_cb_data));
+
+	// Descriptor set layout: one uniform buffer at binding 0, visible to the
+	// vertex stage only (the fragment shader never reads it).
+	spudgpu_descriptor_set_layout_desc set_layout_desc = {
+	    .bindings = {
+	        {.binding = 0, .descriptor_type = SPUDGPU_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .count = 1, .stage_flags = SPUDGPU_SHADER_STAGE_VERTEX},
+	    },
+	    .binding_count = 1,
+	};
+	spudgpu_descriptor_set_layout set_layout = NULL;
+	if (SPUDFAIL(spudgpu_create_descriptor_set_layout(device, &set_layout_desc, &set_layout))) {
+		fprintf(stderr, "spudgpu_create_descriptor_set_layout failed\n");
+		return 1;
+	}
+
+	spudgpu_descriptor_pool_desc pool_desc = {
+	    .max_sets       = 1,
+	    .pool_sizes     = {{.descriptor_type = SPUDGPU_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .count = 1}},
+	    .pool_size_count = 1,
+	};
+	spudgpu_descriptor_pool descriptor_pool = NULL;
+	if (SPUDFAIL(spudgpu_create_descriptor_pool(device, &pool_desc, &descriptor_pool))) {
+		fprintf(stderr, "spudgpu_create_descriptor_pool failed\n");
+		return 1;
+	}
+
+	spudgpu_descriptor_set_desc set_desc = {
+	    .pool       = descriptor_pool,
+	    .set_layouts = {set_layout},
+	    .set_count  = 1,
+	};
+	spudgpu_descriptor_set scene_set = NULL;
+	if (SPUDFAIL(spudgpu_create_descriptor_sets(device, &set_desc, &scene_set))) {
+		fprintf(stderr, "spudgpu_create_descriptor_sets failed\n");
+		return 1;
+	}
+
+	spudgpu_descriptor_buffer_info scene_cb_info = {
+	    .buffer = scene_cb,
+	    .offset = 0,
+	    .range  = sizeof(SceneConstantBuffer),
+	};
+	spudgpu_write_descriptor_set scene_write = {
+	    .dst_set           = scene_set,
+	    .dst_binding       = 0,
+	    .dst_array_element = 0,
+	    .descriptor_count  = 1,
+	    .descriptor_type   = SPUDGPU_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+	    .buffer_info       = &scene_cb_info,
+	};
+	spudgpu_update_descriptor_sets(device, &scene_write, 1);
+
+	spudgpu_shader_module vertex_module   = load_shader_module(device, "shaders/scene.vert.spv", SPUDGPU_SHADER_STAGE_VERTEX);
+	spudgpu_shader_module fragment_module = load_shader_module(device, "shaders/scene.frag.spv", SPUDGPU_SHADER_STAGE_FRAGMENT);
 
 	spudgpu_shader_pipeline_desc pipeline_desc = {
 	    .vertex_module   = vertex_module,
@@ -181,6 +259,8 @@ int main(void) {
 	    .front_face_ccw         = true,
 	    .color_attachment_format = SPUDGPU_FORMAT_B8G8R8A8_UNORM,
 	    .depth_format            = SPUDGPU_FORMAT_UNKNOWN,
+	    .descriptor_set_layouts     = {set_layout},
+	    .descriptor_set_layout_count = 1,
 	};
 	spudgpu_shader_pipeline pipeline = NULL;
 	if (SPUDFAIL(spudgpu_create_shader_pipeline(device, &pipeline_desc, &pipeline))) {
@@ -195,6 +275,9 @@ int main(void) {
 	spudgpu_command_list cmd = NULL;
 	spudgpu_create_command_list(command_allocator, &cmd);
 
+	const float translation_speed = 0.005f;
+	const float offset_bounds     = 1.25f;
+
 	bool running = true;
 	while (running) {
 		SDL_Event event;
@@ -203,8 +286,13 @@ int main(void) {
 				running = false;
 		}
 
-		uint32_t image_index               = spudgpu_swap_chain_acquire_next_image(swap_chain);
-		spudgpu_image_view backbuffer_view  = spudgpu_get_swap_chain_image_view(swap_chain, image_index);
+		scene_cb_data.offset[0] += translation_speed;
+		if (scene_cb_data.offset[0] > offset_bounds)
+			scene_cb_data.offset[0] = -offset_bounds;
+		memcpy(scene_cb_mapped, &scene_cb_data, sizeof(scene_cb_data));
+
+		uint32_t image_index              = spudgpu_swap_chain_acquire_next_image(swap_chain);
+		spudgpu_image_view backbuffer_view = spudgpu_get_swap_chain_image_view(swap_chain, image_index);
 
 		spudgpu_reset_command_allocator(command_allocator);
 		spudgpu_begin_command_list(cmd);
@@ -227,6 +315,7 @@ int main(void) {
 		spudgpu_cmd_begin_rendering(cmd, &rendering_desc);
 
 		spudgpu_cmd_bind_pipeline(cmd, pipeline);
+		spudgpu_cmd_bind_descriptor_sets(cmd, pipeline, 0, &scene_set, 1);
 
 		SPUDGPU_VIEWPORT viewport = {.x = 0, .y = 0, .width = WINDOW_WIDTH, .height = WINDOW_HEIGHT, .minDepth = 0.0f, .maxDepth = 1.0f};
 		spudgpu_cmd_set_viewports(cmd, 0, 1, &viewport);
@@ -253,6 +342,10 @@ int main(void) {
 	spudgpu_destroy_shader_pipeline(pipeline);
 	spudgpu_destroy_shader_module(fragment_module);
 	spudgpu_destroy_shader_module(vertex_module);
+	spudgpu_destroy_descriptor_pool(descriptor_pool);
+	spudgpu_destroy_descriptor_set_layout(set_layout);
+	spudgpu_unmap_buffer(scene_cb);
+	spudgpu_destroy_buffer(scene_cb);
 	spudgpu_destroy_buffer_view(vertex_buffer_view);
 	spudgpu_destroy_buffer(vertex_buffer);
 	spudgpu_destroy_swap_chain(swap_chain);
