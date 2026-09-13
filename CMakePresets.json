@@ -22,6 +22,15 @@
       }
     },
     {
+      "name": "linux-vulkan",
+      "displayName": "SpudGPU Samples Linux Vulkan",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-linux-vulkan",
+      "cacheVariables": {
+        "GRAPHICS_BACKEND": "Vulkan"
+      }
+    },
+    {
       "name": "macos-metal",
       "displayName": "SpudGPU Samples macOS Metal",
       "generator": "Ninja",
