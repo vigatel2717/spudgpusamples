@@ -4,10 +4,20 @@
 // every triangle with one spudgpu_cmd_draw_indirect call, reading its
 // per-triangle draw arguments straight out of the compute pass's output
 // buffer. SPACE toggles the compute culling pass on/off -- see ../../README.md
-// for the two deliberate simplifications versus the original D3D12 sample
-// (flat indirect draw instead of GPU-side compaction, first_instance-as-index
-// instead of a per-draw root CBV update) and why they're the correct
+// for the deliberate simplification versus the original D3D12 sample (flat
+// indirect draw instead of GPU-side compaction) and why it's the correct
 // portable choice rather than a workaround.
+//
+// Per-triangle offset/color is delivered as a per-instance vertex attribute
+// (scene_buffer bound at vertex binding slot 1, per_instance = true), NOT via
+// gl_InstanceIndex/SV_InstanceID indexing into a storage buffer. D3D12's
+// SV_InstanceID does not include StartInstanceLocation the way Vulkan's
+// gl_InstanceIndex does -- unlike the fixed-function input assembler's
+// per-instance vertex fetch, which *does* correctly offset by
+// StartInstanceLocation (first_instance) on every backend. That's the
+// portable equivalent of the original sample's per-draw root CBV update
+// (see ../../README.md) without needing an indirect-argument shape D3D12
+// alone can do.
 //
 
 #include <SDL3/SDL.h>
@@ -19,6 +29,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if SPUDLIB_PLATFORM_WINDOWS
+#define _USE_MATH_DEFINES // MSVC <math.h> checks this, needed to use M_PI macro
+#include <corecrt_math_defines.h>
+#endif
 
 #define WINDOW_WIDTH 1280
 #define WINDOW_HEIGHT 720
@@ -124,16 +139,8 @@ int main(void) {
 		return 1;
 	}
 
-#if SPUDGPU_COMPILE_D3D12_API
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_D3D12;
-#elif SPUDGPU_COMPILE_METAL_API
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_METAL;
-#else
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_VULKAN;
-#endif
-
 	spudgpu_instance instance = NULL;
-	if (SPUDFAIL(spudgpu_create_instance(native_api, "SpudGPUExecuteIndirect", 1, "SpudGPUSamples", 1, &instance))) {
+	if (SPUDFAIL(spudgpu_create_instance("SpudGPUExecuteIndirect", 1, "SpudGPUSamples", 1, &instance))) {
 		fprintf(stderr, "spudgpu_create_instance failed\n");
 		return 1;
 	}
@@ -179,8 +186,9 @@ int main(void) {
 	}
 
 	// Vertex buffer: one hardcoded triangle, instanced/drawn TRIANGLE_COUNT
-	// times via indirect draw args -- each instance reads its own animated
-	// position/color out of scene_buffer via gl_InstanceIndex.
+	// times via indirect draw args -- each instance's animated offset/color
+	// comes from scene_buffer, bound as a second, per-instance vertex buffer
+	// (see graphics_pipeline_desc.vertex_bindings below).
 	static const Vertex vertices[3] = {
 	    {{0.0f, TRIANGLE_HALF_WIDTH, TRIANGLE_DEPTH}},
 	    {{TRIANGLE_HALF_WIDTH, -TRIANGLE_HALF_WIDTH, TRIANGLE_DEPTH}},
@@ -211,10 +219,11 @@ int main(void) {
 	spudgpu_buffer_view vertex_buffer_view = NULL;
 	spudgpu_create_buffer_view(vertex_buffer, &vertex_buffer_view_desc, &vertex_buffer_view);
 
-	// Per-triangle animated state -- UNIFORM (not STORAGE), kept mapped for
-	// the app's lifetime and rewritten every frame, same pattern as
-	// HelloConstBuffers. Read by both the compute pass (culling test) and the
-	// vertex shader (position/color), each through its own descriptor set.
+	// Per-triangle animated state -- UNIFORM (culling test, read by the
+	// compute pass through a descriptor set) + VERTEX (offset/color, read by
+	// the graphics pass as a per-instance vertex buffer -- see
+	// graphics_pipeline_desc below). Kept mapped for the app's lifetime and
+	// rewritten every frame, same pattern as HelloConstBuffers.
 	SceneConstantBuffer scene_cb_data[TRIANGLE_COUNT];
 	for (uint32_t i = 0; i < TRIANGLE_COUNT; i++) {
 		scene_cb_data[i].velocity[0] = rand_float(0.01f, 0.02f);
@@ -230,7 +239,7 @@ int main(void) {
 	}
 
 	spudgpu_buffer_desc scene_buffer_desc = {
-	    .usage        = SPUDGPU_BUFFER_USAGE_UNIFORM,
+	    .usage        = SPUDGPU_BUFFER_USAGE_UNIFORM | SPUDGPU_BUFFER_USAGE_VERTEX,
 	    .memory_flags = SPUDGPU_MEMORY_FLAGS_HOST_VISIBLE | SPUDGPU_MEMORY_FLAGS_HOST_COHERENT,
 	    .size         = sizeof(scene_cb_data),
 	};
@@ -242,6 +251,15 @@ int main(void) {
 	void *scene_mapped = NULL;
 	spudgpu_map_buffer(scene_buffer, 0, 0, &scene_mapped);
 	memcpy(scene_mapped, scene_cb_data, sizeof(scene_cb_data));
+
+	spudgpu_buffer_view_desc scene_buffer_view_desc = {
+	    .parent_buffer             = scene_buffer,
+	    .offset_from_parent_buffer = 0,
+	    .stride                    = sizeof(SceneConstantBuffer),
+	    .size                      = sizeof(scene_cb_data),
+	};
+	spudgpu_buffer_view scene_buffer_view = NULL;
+	spudgpu_create_buffer_view(scene_buffer, &scene_buffer_view_desc, &scene_buffer_view);
 
 	// Shared projection matrix -- identical for every triangle (fixed aspect
 	// ratio/FOV), so it's one small uniform rather than duplicated
@@ -379,13 +397,14 @@ int main(void) {
 		return 1;
 	}
 
-	// Graphics descriptor set: scene (0), projection (1).
+	// Graphics descriptor set: projection (0). Per-triangle offset/color no
+	// longer goes through a descriptor -- it's a per-instance vertex buffer
+	// (see graphics_pipeline_desc below).
 	spudgpu_descriptor_set_layout_desc graphics_set_layout_desc = {
 	    .bindings = {
 	        {.binding = 0, .descriptor_type = SPUDGPU_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .count = 1, .stage_flags = SPUDGPU_SHADER_STAGE_VERTEX},
-	        {.binding = 1, .descriptor_type = SPUDGPU_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .count = 1, .stage_flags = SPUDGPU_SHADER_STAGE_VERTEX},
 	    },
-	    .binding_count = 2,
+	    .binding_count = 1,
 	};
 	spudgpu_descriptor_set_layout graphics_set_layout = NULL;
 	if (SPUDFAIL(spudgpu_create_descriptor_set_layout(device, &graphics_set_layout_desc, &graphics_set_layout))) {
@@ -395,7 +414,7 @@ int main(void) {
 
 	spudgpu_descriptor_pool_desc graphics_pool_desc = {
 	    .max_sets        = 1,
-	    .pool_sizes      = {{.descriptor_type = SPUDGPU_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .count = 2}},
+	    .pool_sizes      = {{.descriptor_type = SPUDGPU_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .count = 1}},
 	    .pool_size_count = 1,
 	};
 	spudgpu_descriptor_pool graphics_pool = NULL;
@@ -415,13 +434,11 @@ int main(void) {
 		return 1;
 	}
 
-	spudgpu_descriptor_buffer_info graphics_scene_info      = {.buffer = scene_buffer, .offset = 0, .range = sizeof(scene_cb_data)};
 	spudgpu_descriptor_buffer_info graphics_projection_info = {.buffer = projection_buffer, .offset = 0, .range = sizeof(projection)};
-	spudgpu_write_descriptor_set graphics_writes[2] = {
-	    {.dst_set = graphics_set, .dst_binding = 0, .descriptor_count = 1, .descriptor_type = SPUDGPU_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .buffer_info = &graphics_scene_info},
-	    {.dst_set = graphics_set, .dst_binding = 1, .descriptor_count = 1, .descriptor_type = SPUDGPU_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .buffer_info = &graphics_projection_info},
+	spudgpu_write_descriptor_set graphics_writes[1] = {
+	    {.dst_set = graphics_set, .dst_binding = 0, .descriptor_count = 1, .descriptor_type = SPUDGPU_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .buffer_info = &graphics_projection_info},
 	};
-	spudgpu_update_descriptor_sets(device, graphics_writes, 2);
+	spudgpu_update_descriptor_sets(device, graphics_writes, 1);
 
 	spudgpu_shader_module vertex_module   = load_shader_module(device, "shaders/scene.vert.spv", SPUDGPU_SHADER_STAGE_VERTEX);
 	spudgpu_shader_module fragment_module = load_shader_module(device, "shaders/scene.frag.spv", SPUDGPU_SHADER_STAGE_FRAGMENT);
@@ -431,12 +448,15 @@ int main(void) {
 	    .fragment_module    = fragment_module,
 	    .vertex_attributes  = {
 	        {.location = 0, .binding = 0, .format = SPUDGPU_FORMAT_R32G32B32_FLOAT, .offset = offsetof(Vertex, position)},
+	        {.location = 1, .binding = 1, .format = SPUDGPU_FORMAT_R32G32B32A32_FLOAT, .offset = offsetof(SceneConstantBuffer, offset)},
+	        {.location = 2, .binding = 1, .format = SPUDGPU_FORMAT_R32G32B32A32_FLOAT, .offset = offsetof(SceneConstantBuffer, color)},
 	    },
-	    .vertex_attribute_count = 1,
+	    .vertex_attribute_count = 3,
 	    .vertex_bindings        = {
 	        {.binding = 0, .stride = sizeof(Vertex), .per_instance = false},
+	        {.binding = 1, .stride = sizeof(SceneConstantBuffer), .per_instance = true},
 	    },
-	    .vertex_binding_count        = 1,
+	    .vertex_binding_count        = 2,
 	    .primitive_topology          = SPUDGPU_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
 	    .cull_mode                   = SPUDGPU_CULL_MODE_NONE,
 	    .front_face_ccw              = true,
@@ -532,7 +552,8 @@ int main(void) {
 		spudgpu_cmd_set_viewports(cmd, 0, 1, &viewport);
 		spudgpu_cmd_set_scissor_rects(cmd, 0, 1, enable_culling ? &culling_scissor : &full_scissor);
 
-		spudgpu_cmd_set_vertex_buffers(cmd, 0, 1, &vertex_buffer_view);
+		spudgpu_buffer_view graphics_vertex_buffer_views[2] = {vertex_buffer_view, scene_buffer_view};
+		spudgpu_cmd_set_vertex_buffers(cmd, 0, 2, graphics_vertex_buffer_views);
 		spudgpu_cmd_draw_indirect(
 		    cmd,
 		    enable_culling ? output_commands_buffer : input_commands_buffer,
@@ -571,9 +592,9 @@ int main(void) {
 	spudgpu_destroy_descriptor_pool(compute_pool);
 	spudgpu_destroy_descriptor_set_layout(compute_set_layout);
 	spudgpu_unmap_buffer(scene_buffer);
+	spudgpu_destroy_buffer_view(scene_buffer_view);
 	spudgpu_destroy_buffer(scene_buffer);
 	spudgpu_destroy_buffer(projection_buffer);
-	spudgpu_unmap_buffer(input_commands_buffer);
 	spudgpu_destroy_buffer(input_commands_buffer);
 	spudgpu_destroy_buffer(output_commands_buffer);
 	spudgpu_destroy_buffer_view(vertex_buffer_view);

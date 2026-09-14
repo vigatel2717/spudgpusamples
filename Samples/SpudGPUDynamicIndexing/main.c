@@ -23,6 +23,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if SPUDLIB_PLATFORM_WINDOWS
+#define _USE_MATH_DEFINES // MSVC <math.h> checks this, needed to use M_PI macro
+#include <corecrt_math_defines.h>
+#endif
+
 #define WINDOW_WIDTH 1280
 #define WINDOW_HEIGHT 720
 
@@ -415,14 +420,8 @@ int main(void) {
 		return 1;
 	}
 
-#if SPUDGPU_COMPILE_D3D12_API
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_D3D12;
-#else
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_VULKAN;
-#endif
-
 	spudgpu_instance instance = NULL;
-	if (SPUDFAIL(spudgpu_create_instance(native_api, "SpudGPUDynamicIndexing", 1, "SpudGPUSamples", 1, &instance))) {
+	if (SPUDFAIL(spudgpu_create_instance("SpudGPUDynamicIndexing", 1, "SpudGPUSamples", 1, &instance))) {
 		fprintf(stderr, "spudgpu_create_instance failed\n");
 		return 1;
 	}

@@ -71,16 +71,8 @@ int main(void) {
 		return 1;
 	}
 
-#if SPUDGPU_COMPILE_D3D12_API
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_D3D12;
-#elif SPUDGPU_COMPILE_METAL_API
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_METAL;
-#else
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_VULKAN;
-#endif
-
 	spudgpu_instance instance = NULL;
-	if (SPUDFAIL(spudgpu_create_instance(native_api, "SpudGPUHelloTriangle", 1, "SpudGPUSamples", 1, &instance))) {
+	if (SPUDFAIL(spudgpu_create_instance("SpudGPUHelloTriangle", 1, "SpudGPUSamples", 1, &instance))) {
 		fprintf(stderr, "spudgpu_create_instance failed\n");
 		return 1;
 	}

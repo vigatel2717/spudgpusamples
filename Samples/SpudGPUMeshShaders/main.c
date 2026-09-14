@@ -17,6 +17,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if SPUDLIB_PLATFORM_WINDOWS
+#define _USE_MATH_DEFINES // MSVC <math.h> checks this, needed to use M_PI macro
+#include <corecrt_math_defines.h>
+#endif
+
 #define WINDOW_WIDTH 1280
 #define WINDOW_HEIGHT 720
 
@@ -304,28 +309,62 @@ static spudgpu_shader_module load_shader_module(
 	return module;
 }
 
-// Creates a device-local-but-host-visible storage buffer and copies
-// [data, data+size) into it once. See ../../README.md: HOST_VISIBLE +
-// STORAGE is invalid on D3D12 (an UPLOAD-heap resource can't carry
-// D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, which SPUDGPU_BUFFER_USAGE_STORAGE
-// always adds there) -- correct on Vulkan and Metal (both backends this
-// sample was actually verified against), a known, documented gap on D3D12
-// pending a spudgpu_cmd_copy_buffer command that doesn't exist yet.
-static spudgpu_buffer create_storage_buffer_with_data(spudgpu_device device, const void *data, uint64_t size) {
-	spudgpu_buffer_desc desc = {
-	    .usage        = SPUDGPU_BUFFER_USAGE_STORAGE,
+// Creates a device-local storage buffer and uploads [data, data+size) into
+// it once, via a temporary host-visible staging buffer + spudgpu_cmd_copy_buffer
+// (now implemented on every backend). HOST_VISIBLE + STORAGE together (a
+// directly-mappable storage buffer) is invalid on D3D12 -- an UPLOAD-heap
+// resource can't carry D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, which
+// SPUDGPU_BUFFER_USAGE_STORAGE always adds there -- so this can't just map
+// the real buffer directly the way every other one-time upload in this
+// suite does. Synchronous (one begin/end/submit/wait per call): this only
+// runs a handful of times at startup, so the simplicity is worth more than
+// batching all four uploads into one submission.
+static spudgpu_buffer create_storage_buffer_with_data(
+    spudgpu_device device, spudgpu_command_list cmd, spudgpu_command_queue graphics_queue,
+    const void *data, uint64_t size) {
+	spudgpu_buffer_desc staging_desc = {
+	    .usage        = SPUDGPU_BUFFER_USAGE_TRANSFER_SRC,
 	    .memory_flags = SPUDGPU_MEMORY_FLAGS_HOST_VISIBLE | SPUDGPU_MEMORY_FLAGS_HOST_COHERENT,
 	    .size         = size,
 	};
-	spudgpu_buffer buffer = NULL;
-	if (SPUDFAIL(spudgpu_create_buffer(device, &desc, &buffer))) {
-		fprintf(stderr, "spudgpu_create_buffer (storage) failed\n");
+	spudgpu_buffer staging = NULL;
+	if (SPUDFAIL(spudgpu_create_buffer(device, &staging_desc, &staging))) {
+		fprintf(stderr, "spudgpu_create_buffer (staging) failed\n");
 		exit(1);
 	}
 	void *mapped = NULL;
-	spudgpu_map_buffer(buffer, 0, 0, &mapped);
+	spudgpu_map_buffer(staging, 0, 0, &mapped);
 	memcpy(mapped, data, size);
-	spudgpu_unmap_buffer(buffer);
+	spudgpu_unmap_buffer(staging);
+
+	spudgpu_buffer_desc real_desc = {
+	    .usage        = SPUDGPU_BUFFER_USAGE_STORAGE | SPUDGPU_BUFFER_USAGE_TRANSFER_DST,
+	    .memory_flags = SPUDGPU_MEMORY_FLAGS_DEVICE_LOCAL,
+	    .size         = size,
+	};
+	spudgpu_buffer buffer = NULL;
+	if (SPUDFAIL(spudgpu_create_buffer(device, &real_desc, &buffer))) {
+		fprintf(stderr, "spudgpu_create_buffer (storage) failed\n");
+		exit(1);
+	}
+
+	// No COMMON -> UNORDERED_ACCESS barrier here: D3D12 implicitly promotes
+	// this buffer to COPY_DEST for the copy itself, and that promoted state
+	// doesn't decay back to COMMON until this command list actually finishes
+	// executing (at the ExecuteCommandLists boundary) -- a barrier recorded
+	// right here, in the same not-yet-submitted command list, would have to
+	// declare "before = COPY_DEST" to match, not COMMON. Simplest correct
+	// fix: transition to UNORDERED_ACCESS later, in a separate command list
+	// recorded after this one has been submitted and the queue drained
+	// (see the buffer_barriers passed alongside the depth image's barrier
+	// below) -- by then the buffer has legitimately decayed back to COMMON.
+	spudgpu_begin_command_list(cmd);
+	spudgpu_cmd_copy_buffer(cmd, staging, buffer, 0, 0, size);
+	spudgpu_end_command_list(cmd);
+	spudgpu_submit_command_lists(graphics_queue, &cmd, 1);
+	spudgpu_queue_wait_idle(graphics_queue);
+
+	spudgpu_destroy_buffer(staging);
 	return buffer;
 }
 
@@ -341,16 +380,8 @@ int main(void) {
 		return 1;
 	}
 
-#if SPUDGPU_COMPILE_D3D12_API
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_D3D12;
-#elif SPUDGPU_COMPILE_METAL_API
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_METAL;
-#else
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_VULKAN;
-#endif
-
 	spudgpu_instance instance = NULL;
-	if (SPUDFAIL(spudgpu_create_instance(native_api, "SpudGPUMeshShaders", 1, "SpudGPUSamples", 1, &instance))) {
+	if (SPUDFAIL(spudgpu_create_instance("SpudGPUMeshShaders", 1, "SpudGPUSamples", 1, &instance))) {
 		fprintf(stderr, "spudgpu_create_instance failed\n");
 		return 1;
 	}
@@ -402,6 +433,16 @@ int main(void) {
 		return 1;
 	}
 
+	// Created here (rather than just before the main loop, as in most other
+	// samples) because create_storage_buffer_with_data below already needs a
+	// command list to record its staging-buffer upload into.
+	spudgpu_command_allocator_desc allocator_desc = {.type = SPUDGPU_COMMAND_LIST_TYPE_DIRECT};
+	spudgpu_command_allocator command_allocator   = NULL;
+	spudgpu_create_command_allocator(device, &allocator_desc, &command_allocator);
+
+	spudgpu_command_list cmd = NULL;
+	spudgpu_create_command_list(command_allocator, &cmd);
+
 	// ------------------------------------------------------------------
 	// Load and parse Dragon_LOD0.bin (single mesh).
 	// ------------------------------------------------------------------
@@ -447,10 +488,10 @@ int main(void) {
 	uint32_t meshlet_subset_count = meshlet_subset_size / sizeof(Subset);
 	const Subset *meshlet_subsets = (const Subset *) (blob + meshlet_subset_offset);
 
-	spudgpu_buffer vertices_buffer      = create_storage_buffer_with_data(device, blob + vtx_offset, vtx_size);
-	spudgpu_buffer meshlets_buffer      = create_storage_buffer_with_data(device, blob + meshlet_offset, meshlet_size);
-	spudgpu_buffer unique_vtx_idx_buffer = create_storage_buffer_with_data(device, blob + uvi_offset, uvi_size);
-	spudgpu_buffer primitive_idx_buffer = create_storage_buffer_with_data(device, blob + pi_offset, pi_size);
+	spudgpu_buffer vertices_buffer      = create_storage_buffer_with_data(device, cmd, graphics_queue, blob + vtx_offset, vtx_size);
+	spudgpu_buffer meshlets_buffer      = create_storage_buffer_with_data(device, cmd, graphics_queue, blob + meshlet_offset, meshlet_size);
+	spudgpu_buffer unique_vtx_idx_buffer = create_storage_buffer_with_data(device, cmd, graphics_queue, blob + uvi_offset, uvi_size);
+	spudgpu_buffer primitive_idx_buffer = create_storage_buffer_with_data(device, cmd, graphics_queue, blob + pi_offset, pi_size);
 
 	free(file_data);
 
@@ -555,13 +596,6 @@ int main(void) {
 		return 1;
 	}
 
-	spudgpu_command_allocator_desc allocator_desc = {.type = SPUDGPU_COMMAND_LIST_TYPE_DIRECT};
-	spudgpu_command_allocator command_allocator   = NULL;
-	spudgpu_create_command_allocator(device, &allocator_desc, &command_allocator);
-
-	spudgpu_command_list cmd = NULL;
-	spudgpu_create_command_list(command_allocator, &cmd);
-
 	// depth image created/transitioned via `cmd` before the main loop starts.
 	spudgpu_image_desc depth_image_desc = {
 	    .usage        = SPUDGPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT,
@@ -590,6 +624,22 @@ int main(void) {
 
 	spudgpu_begin_command_list(cmd);
 	spudgpu_cmd_image_barrier(cmd, depth_image, SPUDGPU_IMAGE_LAYOUT_UNDEFINED, SPUDGPU_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+	// Mesh shaders read these as UAVs (SPUDGPU_DESCRIPTOR_TYPE_STORAGE_BUFFER
+	// maps to D3D12_DESCRIPTOR_RANGE_TYPE_UAV) -- unlike the read-only states
+	// D3D12 promotes to implicitly, UNORDERED_ACCESS needs an explicit
+	// transition. COMMON is valid as "before" here specifically because each
+	// buffer's own upload command list (create_storage_buffer_with_data) has
+	// already been submitted and the queue drained by this point, so the
+	// COPY_DEST state that upload promoted to has already decayed back to
+	// COMMON -- see that function's comment for why the same transition
+	// can't happen inside its own command list.
+	spudgpu_buffer_barrier buffer_barriers[4] = {
+	    {.buffer = vertices_buffer, .state_before = SPUDGPU_RESOURCE_STATE_COMMON, .state_after = SPUDGPU_RESOURCE_STATE_UNORDERED_ACCESS},
+	    {.buffer = meshlets_buffer, .state_before = SPUDGPU_RESOURCE_STATE_COMMON, .state_after = SPUDGPU_RESOURCE_STATE_UNORDERED_ACCESS},
+	    {.buffer = unique_vtx_idx_buffer, .state_before = SPUDGPU_RESOURCE_STATE_COMMON, .state_after = SPUDGPU_RESOURCE_STATE_UNORDERED_ACCESS},
+	    {.buffer = primitive_idx_buffer, .state_before = SPUDGPU_RESOURCE_STATE_COMMON, .state_after = SPUDGPU_RESOURCE_STATE_UNORDERED_ACCESS},
+	};
+	spudgpu_cmd_pipeline_barrier(cmd, buffer_barriers, 4, NULL, 0);
 	spudgpu_end_command_list(cmd);
 	spudgpu_submit_command_lists(graphics_queue, &cmd, 1);
 	spudgpu_queue_wait_idle(graphics_queue);

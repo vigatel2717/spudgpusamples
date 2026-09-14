@@ -27,8 +27,10 @@ workaround to invent here.
 
 `SpudGPUExecuteIndirect` closed a real gap: `spudgpu` had no compute-dispatch
 call at all, and no buffer pipeline barriers on any backend, both now added
-alongside `spudgpu_cmd_draw_indirect`/`_indexed_indirect`. The port itself
-deviates from the original in two deliberate, documented ways:
+alongside `spudgpu_cmd_draw_indirect`/`_indexed_indirect`. The port deviates
+from the original in one deliberate, documented way, and initially shipped a
+second deviation that turned out to be a genuine D3D12 portability bug rather
+than a valid simplification (see below):
 
 - **No GPU-side compaction.** The original appends visible triangles into a
   tightly-packed buffer (an HLSL `AppendStructuredBuffer`, i.e. a UAV atomic
@@ -42,14 +44,27 @@ deviates from the original in two deliberate, documented ways:
   single fixed-count `spudgpu_cmd_draw_indirect` — fully portable, same
   demonstrated mechanism (a compute pass decides per-triangle what gets
   drawn), just without the bandwidth-compaction optimization.
-- **No per-draw root CBV update.** The original's command signature updates a
-  root constant-buffer-view descriptor per draw, alongside the draw itself —
-  a D3D12-specific indirect-argument shape with no Vulkan/Metal equivalent.
-  This port bakes each triangle's index into its draw's `first_instance`
-  instead (`instance_count = 1`), the standard portable technique — all three
-  APIs surface this back to the vertex shader as the instance-ID system
-  value, so it reads its own per-triangle data from a storage buffer with no
-  vendor extension needed.
+- **No per-draw root CBV update, and no `gl_InstanceIndex` either.** The
+  original's command signature updates a root constant-buffer-view descriptor
+  per draw, alongside the draw itself — a D3D12-specific indirect-argument
+  shape with no Vulkan/Metal equivalent, so this port doesn't use it. The
+  first attempt at a portable substitute baked each triangle's index into its
+  draw's `first_instance` and read it back in the vertex shader via
+  `gl_InstanceIndex`/`SV_InstanceID` — this is broken on D3D12: unlike
+  Vulkan's `gl_InstanceIndex`, D3D12's `SV_InstanceID` does not include
+  `StartInstanceLocation`, so every one of the 256 indirect draws read
+  instance 0's data regardless of its actual `first_instance` (SPIRV-Cross
+  can emulate this via a `SPIRV_Cross_BaseInstance` root constant, but that
+  constant has to be fed per sub-draw through `ExecuteIndirect`'s own
+  per-draw root-constant-update argument — exactly the D3D12-only mechanism
+  this port was trying to avoid). The actual portable substitute: `scene`'s
+  per-triangle offset/color is bound as a second, **per-instance vertex
+  buffer** (`per_instance = true` on its `spudgpu_vertex_binding_desc`)
+  instead of a storage/uniform buffer indexed by instance ID. The
+  fixed-function input assembler's per-instance vertex fetch *does* correctly
+  offset by `StartInstanceLocation` on every backend — this is a separate
+  mechanism from the `SV_InstanceID`/`gl_InstanceIndex` system value, and is
+  the standard, actually-portable technique for per-instance data.
 
 `SpudGPUDynamicIndexing` exercises `spudgpu`'s bindless descriptor indexing
 feature for the first time (`spudgpu_bindless_register_sampled_image`,
@@ -83,17 +98,24 @@ driver/hardware support that varies, surfaced via
 `spudgpu_get_mesh_shading_capabilities`). The sample renders the real
 `Dragon_LOD0.bin` meshlet asset shipped with the original D3D12 sample,
 one GLSL mesh shader (`GL_EXT_mesh_shader`) cross-compiled to all three
-targets exactly like every other sample's shaders. One deliberate,
-documented gap: **no `spudgpu_cmd_copy_buffer` exists yet** (buffer-to-buffer
-copy, added to no backend so far), so the "textbook" pattern of staging CPU
-data through a `TRANSFER_SRC` staging buffer into a `DEVICE_LOCAL` buffer
-isn't available. This sample instead creates its four meshlet data buffers
-as `HOST_VISIBLE | HOST_COHERENT | STORAGE` directly and memcpy's into them —
-correct and fully portable on Vulkan/Metal, but **not valid on D3D12**, where
-an UPLOAD-heap resource can't carry `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`
-(which `SPUDGPU_BUFFER_USAGE_STORAGE` always adds on that backend) — this
-sample is therefore Vulkan/Metal-verified only; D3D12 needs
-`spudgpu_cmd_copy_buffer` before it can run there at all.
+targets exactly like every other sample's shaders. This sample's four
+meshlet data buffers need `SPUDGPU_BUFFER_USAGE_STORAGE`, which can't be
+combined with a host-visible/mappable memory type on D3D12 — an UPLOAD-heap
+resource there can't carry `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`,
+which that usage bit always adds on that backend (Vulkan/Metal have no such
+restriction: a host-visible storage buffer is completely normal on both).
+Getting this sample running on D3D12 closed a real gap in `spudgpu` itself:
+**`spudgpu_cmd_copy_buffer` (buffer-to-buffer copy) didn't exist on any
+backend**, so the textbook fix — stage the CPU data through a small
+`TRANSFER_SRC` buffer, then copy into a real `DEVICE_LOCAL` buffer — wasn't
+available. Now added (`vkCmdCopyBuffer` / `CopyBufferRegion`; Metal's
+`MTLBlitCommandEncoder` copy remains an unimplemented placeholder like this
+file's other blit functions, unverified without Apple hardware), each of the
+four buffers gets a small synchronous staging upload plus a `COMMON` →
+`UNORDERED_ACCESS` pipeline barrier (needed only on D3D12 in practice — that
+transition isn't one of the states D3D12 promotes to implicitly the way it
+does `COPY_DEST`/read-only states, but costs nothing on Vulkan given the
+`spudgpu_queue_wait_idle` already between the copy and first use).
 
 `SpudGPUBundles` closed the last real gap `SPUDGPU_COMMAND_LIST_TYPE_BUNDLE`
 had been sitting on since it was added to the base command-list-type enum:

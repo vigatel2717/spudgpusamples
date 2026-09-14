@@ -56,6 +56,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if SPUDLIB_PLATFORM_WINDOWS
+#define _USE_MATH_DEFINES // MSVC <math.h> checks this, needed to use M_PI macro
+#include <corecrt_math_defines.h>
+#endif
+
 #if !SPUDGPU_EXT_BUNDLES
 #error "SpudGPUBundles needs SPUDGPU_EXT_BUNDLES (Vulkan/D3D12 only -- see spudlib/CLAUDE.md and ../../README.md)."
 #endif
@@ -82,9 +87,8 @@
 
 typedef struct Vertex {
 	float position[3];
-	float normal[3]; // Unused (no lighting/texturing) -- kept only so the
-	                  // vertex stride matches occcity.bin's layout.
-	float uv[2];      // Unused.
+	float normal[3]; // Feeds basic directional lighting in scene.frag.
+	float uv[2];      // Unused (no texturing).
 	float tangent[3]; // Unused.
 } Vertex;
 
@@ -307,10 +311,16 @@ static spudgpu_shader_module load_shader_module(
 }
 
 // Records the fixed sequence every building's draw needs: bind the pipeline,
-// viewport/scissor, vertex/index buffers, then per building bind its CBV
-// descriptor set and draw. Called exactly once, into the bundle, in bundle
-// mode; called every frame, into the direct command list, in direct mode --
-// see the file comment above.
+// vertex/index buffers, then per building bind its CBV descriptor set and
+// draw. Called exactly once, into the bundle, in bundle mode; called every
+// frame, into the direct command list, in direct mode -- see the file
+// comment above.
+//
+// Viewport/scissor are NOT set here -- D3D12 bundles inherit both from the
+// calling command list and error on RSSetViewports/RSSetScissorRects
+// (EXECUTION ERROR #546: INVALID_BUNDLE_API); the caller sets them on cmd
+// once per frame instead, before either executing the bundle or calling
+// this function directly.
 static void record_city_draws(
     spudgpu_command_list target,
     spudgpu_shader_pipeline pipeline,
@@ -319,11 +329,6 @@ static void record_city_draws(
     uint32_t index_count,
     spudgpu_descriptor_set object_sets[CITY_OBJECT_COUNT]) {
 	spudgpu_cmd_bind_pipeline(target, pipeline);
-
-	SPUDGPU_VIEWPORT viewport = {.x = 0, .y = 0, .width = WINDOW_WIDTH, .height = WINDOW_HEIGHT, .minDepth = 0.0f, .maxDepth = 1.0f};
-	spudgpu_cmd_set_viewports(target, 0, 1, &viewport);
-	SPUDGPU_SCISSOR_RECT scissor = {.x = 0, .y = 0, .width = WINDOW_WIDTH, .height = WINDOW_HEIGHT};
-	spudgpu_cmd_set_scissor_rects(target, 0, 1, &scissor);
 
 	spudgpu_cmd_set_vertex_buffers(target, 0, 1, &vertex_buffer_view);
 	spudgpu_cmd_set_index_buffer(target, index_buffer_view);
@@ -346,14 +351,8 @@ int main(void) {
 		return 1;
 	}
 
-#if SPUDGPU_COMPILE_D3D12_API
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_D3D12;
-#else
-	SPUDGPU_NATIVE_API native_api = SPUDGPU_NATIVE_API_VULKAN;
-#endif
-
 	spudgpu_instance instance = NULL;
-	if (SPUDFAIL(spudgpu_create_instance(native_api, "SpudGPUBundles", 1, "SpudGPUSamples", 1, &instance))) {
+	if (SPUDFAIL(spudgpu_create_instance("SpudGPUBundles", 1, "SpudGPUSamples", 1, &instance))) {
 		fprintf(stderr, "spudgpu_create_instance failed\n");
 		return 1;
 	}
@@ -512,8 +511,9 @@ int main(void) {
 	    .fragment_module = fragment_module,
 	    .vertex_attributes = {
 	        {.location = 0, .binding = 0, .format = SPUDGPU_FORMAT_R32G32B32_FLOAT, .offset = offsetof(Vertex, position)},
+	        {.location = 1, .binding = 0, .format = SPUDGPU_FORMAT_R32G32B32_FLOAT, .offset = offsetof(Vertex, normal)},
 	    },
-	    .vertex_attribute_count = 1,
+	    .vertex_attribute_count = 2,
 	    .vertex_bindings        = {{.binding = 0, .stride = sizeof(Vertex), .per_instance = false}},
 	    .vertex_binding_count   = 1,
 	    .primitive_topology     = SPUDGPU_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
@@ -557,7 +557,17 @@ int main(void) {
 	};
 	spudgpu_image_view depth_view = NULL;
 	spudgpu_create_image_view(depth_image, &depth_view_desc, &depth_view);
+
+	// cmd was created via spudgpu_create_command_list but never begun -- a
+	// freshly created command list starts CLOSED, so recording this barrier
+	// needs its own begin/end/submit bracket rather than assuming cmd is
+	// already open (the render loop's first spudgpu_begin_command_list call
+	// happens later and would otherwise discard this on Reset).
+	spudgpu_begin_command_list(cmd);
 	spudgpu_cmd_image_barrier(cmd, depth_image, SPUDGPU_IMAGE_LAYOUT_UNDEFINED, SPUDGPU_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+	spudgpu_end_command_list(cmd);
+	spudgpu_submit_command_lists(graphics_queue, &cmd, 1);
+	spudgpu_queue_wait_idle(graphics_queue);
 
 	// ------------------------------------------------------------------
 	// Bundle: record the entire per-object bind+draw sequence once, up
@@ -596,7 +606,6 @@ int main(void) {
 
 	bool running     = true;
 	bool use_bundles = true;
-	uint32_t frame_counter = 0;
 
 	while (running) {
 		SDL_Event event;
@@ -661,7 +670,23 @@ int main(void) {
 		};
 		spudgpu_cmd_begin_rendering(cmd, &rendering_desc);
 
+		// Viewport/scissor are set here, on the direct list, every frame --
+		// a bundle can't set its own (see record_city_draws above), and it
+		// inherits whatever's already bound on cmd when ExecuteBundle runs.
+		SPUDGPU_VIEWPORT viewport = {.x = 0, .y = 0, .width = WINDOW_WIDTH, .height = WINDOW_HEIGHT, .minDepth = 0.0f, .maxDepth = 1.0f};
+		spudgpu_cmd_set_viewports(cmd, 0, 1, &viewport);
+		SPUDGPU_SCISSOR_RECT scissor = {.x = 0, .y = 0, .width = WINDOW_WIDTH, .height = WINDOW_HEIGHT};
+		spudgpu_cmd_set_scissor_rects(cmd, 0, 1, &scissor);
+
 		if (use_bundles) {
+			// ExecuteBundle requires the direct list's descriptor heaps to
+			// already match the bundle's -- bind the pipeline (root
+			// signature, needed before any SetGraphicsRootDescriptorTable
+			// call) and one object set on cmd purely to prime the heap; the
+			// bundle's own per-building binds (same pool, same heap)
+			// immediately overwrite the root table this sets for object 0.
+			spudgpu_cmd_bind_pipeline(cmd, pipeline);
+			spudgpu_cmd_bind_descriptor_sets(cmd, pipeline, 0, &object_sets[0], 1);
 			spudgpu_cmd_execute_bundle(cmd, bundle);
 		} else {
 			record_city_draws(cmd, pipeline, vertex_buffer_view, index_buffer_view, index_count, object_sets);
@@ -673,9 +698,6 @@ int main(void) {
 		spudgpu_end_command_list(cmd);
 		spudgpu_submit_command_lists_synced(graphics_queue, &cmd, 1, swap_chain);
 		spudgpu_swap_chain_present(swap_chain);
-
-		if (++frame_counter % 300 == 0)
-			printf("frame %u -- bundles %s\n", frame_counter, use_bundles ? "ON" : "OFF");
 	}
 
 	spudgpu_queue_wait_idle(graphics_queue);
