@@ -50,6 +50,7 @@ find_package(SDL3 REQUIRED)
 
 add_subdirectory(Samples/HelloTriangle)
 add_subdirectory(Samples/HelloConstBuffers)
+add_subdirectory(Samples/HelloTexture)
 add_subdirectory(Samples/SpudGPUExecuteIndirect)
 
 # Bindless descriptor indexing (SPUDGPU_EXT_BINDLESS_DESCRIPTOR_INDEXING) is
