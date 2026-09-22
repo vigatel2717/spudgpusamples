@@ -19,11 +19,50 @@ workaround to invent here.
 |---|---|---|
 | HelloTriangle | `D3D12HelloWorld/HelloTriangle` | Ported |
 | HelloConstBuffers | `D3D12HelloWorld/HelloConstBuffers` | Ported |
+| HelloTexture | `D3D12HelloWorld/HelloTexture` | Ported, all backends (see note below) |
 | SpudGPUExecuteIndirect | `D3D12ExecuteIndirect` | Ported (see note below) |
 | SpudGPUDynamicIndexing | `D3D12DynamicIndexing` | Ported, Vulkan/D3D12 only (see note below) |
 | SpudGPUMeshShaders | `D3D12MeshShaders/MeshletRender` | Ported, all backends (see note below) |
 | SpudGPUBundles | `D3D12Bundles` | Ported, Vulkan/D3D12 only (see note below) |
 | SpudGPUDepthBoundsTest | `D3D12DepthBoundsTest` | Ported, all backends (see note below) |
+
+`HelloTexture` closed a real gap and worked around another. The gap it
+closed: `spudgpu_cmd_copy_buffer_to_image`/`_copy_image_to_buffer` and
+`spudgpu_get_image_buffer_copy_size` were unimplemented placeholders on
+Metal — `spudgpumetalrenderpass.m`'s file comment already flagged its
+copy/blit functions as such, "no caller needs them yet" (see
+`SpudGPUMeshShaders` above, whose buffer-to-buffer copy hit the same
+placeholder). This sample's texture upload was the first caller to actually
+need buffer-to-image, and it silently produced a solid-black texture until
+these were implemented for real via `MTLBlitCommandEncoder`
+(`copyFromBuffer:toTexture:`/`copyFromTexture:toBuffer:`), gated behind a new
+`_active_blit_encoder` on the command list that ends any active render/compute
+encoder before opening (mirroring `_active_compute_encoder`'s existing
+pattern) since Metal disallows two live encoders of different kinds on one
+command buffer at once.
+
+The gap this port works around instead of closing:
+`SPUDGPU_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` — declared in `spudgpu.h` and
+implemented on Vulkan/D3D12 since the type was added — doesn't actually work
+on Metal. `spudgpumetaldescriptors.m` already documented that a combined
+descriptor's paired sampler is "intentionally not written" there, and
+cross-compiling a GLSL `sampler2D` confirms why: under SpudGPU's
+per-descriptor-set-argument-buffer scheme, SPIRV-Cross's synthesized sampler
+member overlaps the texture's own binding slot, which it only permits via
+"full mutable aliasing" on Metal 3+ (`spirv_msl.cpp`). This port doesn't fix
+that gap — it works around it the same way `SpudGPUDynamicIndexing`'s
+bindless design already had to: a `texture2D` at one binding and a plain
+`sampler` at the next, written as separate `SPUDGPU_DESCRIPTOR_TYPE_SAMPLED_
+IMAGE`/`SPUDGPU_DESCRIPTOR_TYPE_SAMPLER` descriptors instead of one combined
+one. This is the first sample to exercise that split-descriptor idiom outside
+bindless, and the first to exercise ordinary (non-bindless) texture sampling
+on Metal at all. Two smaller, harmless deviations alongside it: a real
+dynamic `spudgpu_sampler` stands in for the original's static/immutable
+root-signature sampler (`spudgpu_sampler_desc` has no such mechanism yet —
+see `spudlib/CLAUDE.md`'s "Known gaps"), and `CLAMP_TO_EDGE` addressing
+replaces the original's `CLAMP_TO_BORDER` with a transparent-black border
+(`spudgpu_sampler_desc` has no border-color field) — this sample's UVs never
+leave `[0, 1]`, so the two modes look identical here regardless.
 
 `SpudGPUExecuteIndirect` closed a real gap: `spudgpu` had no compute-dispatch
 call at all, and no buffer pipeline barriers on any backend, both now added
@@ -109,9 +148,11 @@ Getting this sample running on D3D12 closed a real gap in `spudgpu` itself:
 backend**, so the textbook fix — stage the CPU data through a small
 `TRANSFER_SRC` buffer, then copy into a real `DEVICE_LOCAL` buffer — wasn't
 available. Now added (`vkCmdCopyBuffer` / `CopyBufferRegion`; Metal's
-`MTLBlitCommandEncoder` copy remains an unimplemented placeholder like this
-file's other blit functions, unverified without Apple hardware), each of the
-four buffers gets a small synchronous staging upload plus a `COMMON` →
+`MTLBlitCommandEncoder` copy was initially left as an unimplemented
+placeholder like this file's other blit functions, unverified without Apple
+hardware — see `HelloTexture` below for where that caught up with this
+sample), each of the four buffers gets a small synchronous staging upload
+plus a `COMMON` →
 `UNORDERED_ACCESS` pipeline barrier (needed only on D3D12 in practice — that
 transition isn't one of the states D3D12 promotes to implicitly the way it
 does `COPY_DEST`/read-only states, but costs nothing on Vulkan given the
